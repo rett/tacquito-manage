@@ -2310,6 +2310,21 @@ cmd_install() {
     echo "  Tacquito TACACS+ Server Installer"
     echo "============================================"
     echo ""
+    echo "This will:"
+    echo "  - Install Go ${GO_VERSION} (if not present)"
+    echo "  - Clone and build tacquito from source"
+    echo "  - Create a 'tacquito' service user"
+    echo "  - Configure and start the TACACS+ service on port 49"
+    echo "  - Prompt for shared secret and user passwords"
+    echo ""
+
+    read -rp "Continue with installation? [y/N]: " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        info "Cancelled."
+        exit 0
+    fi
+
+    echo ""
 
     # --- Step 1: Install Go ---
     if command -v /usr/local/go/bin/go &>/dev/null; then
