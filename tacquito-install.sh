@@ -96,16 +96,20 @@ info "Binaries installed:"
 info "  Server:  ${TACQUITO_BIN}"
 info "  Hashgen: ${HASHGEN_BIN}"
 
-# Copy deploy package to canonical location for upgrades
+# Clone management repo for future upgrades
 DEPLOY_DEST="/opt/tacquito-manage"
-mkdir -p "$DEPLOY_DEST"
-cp "${SCRIPT_DIR}/tacquito-manage.sh" "$DEPLOY_DEST/"
-cp "${SCRIPT_DIR}/tacquito-upgrade.sh" "$DEPLOY_DEST/"
-cp "${SCRIPT_DIR}/tacquito.service" "$DEPLOY_DEST/"
-cp "${SCRIPT_DIR}/tacquito.yaml" "$DEPLOY_DEST/"
-cp "${SCRIPT_DIR}/tacquito-install.sh" "$DEPLOY_DEST/"
-cp "${SCRIPT_DIR}/README.md" "$DEPLOY_DEST/" 2>/dev/null || true
-cp "${SCRIPT_DIR}/tacquito.logrotate" "$DEPLOY_DEST/" 2>/dev/null || true
+MANAGE_REPO="https://github.com/rett/tacquito-manage.git"
+if [[ -d "${DEPLOY_DEST}/.git" ]]; then
+    info "Management repo already cloned at ${DEPLOY_DEST}, pulling latest..."
+    cd "$DEPLOY_DEST" && git pull --quiet 2>/dev/null || true
+elif [[ -d "$DEPLOY_DEST" ]]; then
+    rm -rf "$DEPLOY_DEST"
+    git clone --quiet "$MANAGE_REPO" "$DEPLOY_DEST"
+    info "Management repo cloned to ${DEPLOY_DEST}"
+else
+    git clone --quiet "$MANAGE_REPO" "$DEPLOY_DEST"
+    info "Management repo cloned to ${DEPLOY_DEST}"
+fi
 
 # Install management scripts
 cp "${SCRIPT_DIR}/tacquito-manage.sh" /usr/local/bin/tacquito-manage

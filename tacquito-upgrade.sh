@@ -18,13 +18,15 @@ UPGRADE_BIN="/usr/local/bin/tacquito-upgrade"
 CONFIG_DIR="/etc/tacquito"
 SERVICE_FILE="/etc/systemd/system/tacquito.service"
 GO_BIN="/usr/local/go/bin/go"
+MANAGE_REPO="https://github.com/rett/tacquito-manage.git"
+MANAGE_DIR="/opt/tacquito-manage"
 # Look for deploy files: first try the directory this script lives in,
 # then fall back to the canonical deploy location.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/tacquito-manage.sh" ]]; then
     DEPLOY_DIR="$SCRIPT_DIR"
-elif [[ -d "/opt/tacquito-manage" ]]; then
-    DEPLOY_DIR="/opt/tacquito-manage"
+elif [[ -d "$MANAGE_DIR" ]]; then
+    DEPLOY_DIR="$MANAGE_DIR"
 else
     DEPLOY_DIR=""
 fi
@@ -109,6 +111,25 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
     info "Building password hash generator..."
     cd "${TACQUITO_SRC}/cmds/server/config/authenticators/bcrypt/generator"
     go build -o "$HASHGEN_BIN" . || warn "Hashgen build failed (non-critical)."
+fi
+
+# --- Update management repo ---
+if [[ -d "${MANAGE_DIR}/.git" ]]; then
+    info "Pulling latest management scripts..."
+    cd "$MANAGE_DIR"
+    git fetch --quiet 2>/dev/null || true
+    LOCAL_MANAGE=$(git rev-parse HEAD 2>/dev/null)
+    REMOTE_MANAGE=$(git rev-parse @{u} 2>/dev/null || echo "")
+    if [[ -n "$REMOTE_MANAGE" && "$LOCAL_MANAGE" != "$REMOTE_MANAGE" ]]; then
+        git pull --quiet 2>/dev/null
+        info "Management scripts updated: $(git rev-parse --short HEAD)"
+    else
+        info "Management scripts already up to date."
+    fi
+    DEPLOY_DIR="$MANAGE_DIR"
+elif [[ -z "$DEPLOY_DIR" ]]; then
+    info "Cloning management repo..."
+    git clone --quiet "$MANAGE_REPO" "$MANAGE_DIR" 2>/dev/null && DEPLOY_DIR="$MANAGE_DIR" || warn "Failed to clone management repo."
 fi
 
 # --- Update managed scripts ---
