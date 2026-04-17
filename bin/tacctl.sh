@@ -20,6 +20,7 @@
 #   sudo ./tacctl.sh config prefixes [cidr,cidr,...]
 #
 set -euo pipefail
+umask 077
 
 CONFIG="/etc/tacquito/tacquito.yaml"
 BACKUP_DIR="/etc/tacquito/backups"
@@ -119,6 +120,8 @@ backup_config() {
     local ts
     ts=$(date +%Y%m%d_%H%M%S)
     cp "$CONFIG" "${BACKUP_DIR}/tacquito.yaml.${ts}"
+    chmod 640 "${BACKUP_DIR}/tacquito.yaml.${ts}"
+    chown tacquito:tacquito "${BACKUP_DIR}/tacquito.yaml.${ts}" 2>/dev/null || true
     info "Config backed up to ${BACKUP_DIR}/tacquito.yaml.${ts}"
 
     # Prune old backups, keep last $BACKUP_RETENTION
@@ -152,6 +155,15 @@ try:
 except ValueError:
     print('INVALID_HASH')
 " "$password" "$hexhash" 2>/dev/null || echo "FAIL"
+}
+
+# --- Validate class/value names for safe use in sed ---
+validate_class_name() {
+    local value="$1"
+    if [[ ! "$value" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        error "Invalid name '${value}'. Only letters, numbers, underscores, and hyphens are allowed."
+        exit 1
+    fi
 }
 
 # --- Check if user exists ---
@@ -404,7 +416,11 @@ for i, line in enumerate(lines):
         else:
             continue
     out.append(line)
-open(sys.argv[1], 'w').writelines(out)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.writelines(out)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 " "$CONFIG"
 
     # Clean up double blank lines
@@ -627,7 +643,11 @@ config = re.sub(rf'^(\s+- name: ){re.escape(oldname)}$', rf'\g<1>{newname}', con
 # Rename comment if present: '# old' -> '# new'
 config = re.sub(rf'^(\s+# ){re.escape(oldname)}$', rf'\g<1>{newname}', config, flags=re.MULTILINE)
 
-open(sys.argv[1], 'w').write(config)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.write(config)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 " "$CONFIG" "$oldname" "$newname"
 
     chown tacquito:tacquito "$CONFIG"
@@ -683,7 +703,11 @@ newgroup = sys.argv[4]
 pattern = r'(- name: ' + re.escape(username) + r'\n.*?groups: \[\*)' + re.escape(oldgroup) + r'(\])'
 config = re.sub(pattern, r'\g<1>' + newgroup + r'\2', config, flags=re.DOTALL)
 
-open(sys.argv[1], 'w').write(config)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.write(config)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 " "$CONFIG" "$username" "$oldgroup" "$newgroup"
 
     chown tacquito:tacquito "$CONFIG"
@@ -866,6 +890,8 @@ cmd_config_juniper_ro() {
         fi
     fi
 
+    validate_class_name "$new_class"
+
     local old_class
     old_class=$(get_config_value "juniper-ro")
 
@@ -898,6 +924,8 @@ cmd_config_juniper_rw() {
             return
         fi
     fi
+
+    validate_class_name "$new_class"
 
     local old_class
     old_class=$(get_config_value "juniper-rw")
@@ -973,7 +1001,11 @@ config = re.sub(
     flags=re.DOTALL
 )
 
-open(sys.argv[1], 'w').write(config)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.write(config)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 " "$CONFIG" "$new_prefixes"
 
     chown tacquito:tacquito "$CONFIG"
@@ -1256,7 +1288,11 @@ else:
     # Key doesn't exist yet — add it at the end of the file
     config = config.rstrip() + '\n\n' + key + ': [\"' + cidr + '\"]\n'
 
-open(sys.argv[1], 'w').write(config)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.write(config)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 " "$CONFIG" "$key" "$cidr"
             chown tacquito:tacquito "$CONFIG"
             restart_service
@@ -1286,7 +1322,11 @@ if m:
         # Remove the entire line if empty
         config = config.replace(m.group(0) + '\n', '')
 
-open(sys.argv[1], 'w').write(config)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.write(config)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 " "$CONFIG" "$key" "$cidr"
             chown tacquito:tacquito "$CONFIG"
             restart_service
@@ -1471,6 +1511,8 @@ cmd_group_add() {
         exit 1
     fi
 
+    validate_class_name "$jclass"
+
     backup_config
 
     # Insert the new exec service, junos-exec service, and group before "# --- Groups ---"
@@ -1511,7 +1553,11 @@ marker = '# --- Groups ---'
 idx = config.index(marker)
 new_block = sys.argv[2] + '\n'
 config = config[:idx] + new_block + config[idx:]
-open(sys.argv[1], 'w').write(config)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.write(config)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 " "$CONFIG" "$block"
 
     # Insert group definition after the last existing group (before "# --- Users ---")
@@ -1533,7 +1579,11 @@ group_block = [
     '  accounter: *file_accounter\n',
 ]
 lines = lines[:insert_at] + group_block + lines[insert_at:]
-open(sys.argv[1], 'w').writelines(lines)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.writelines(lines)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 " "$CONFIG" "$users_line" "$groupname"
 
     chown tacquito:tacquito "$CONFIG"
@@ -1608,7 +1658,11 @@ config = re.sub(
 # Clean up double blank lines
 config = re.sub(r'\n{3,}', '\n\n', config)
 
-open(sys.argv[1], 'w').write(config)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.write(config)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 " "$CONFIG" "$groupname"
 
     chown tacquito:tacquito "$CONFIG"
@@ -1668,7 +1722,11 @@ svc = sm.group(1)
 pattern = r'(exec_' + re.escape(svc) + r': &exec_' + re.escape(svc) + r'\n  name: exec\n  set_values:\n    - name: priv-lvl\n      values: \[)\d+(\])'
 config = re.sub(pattern, r'\g<1>' + new_val + r'\2', config)
 
-open(sys.argv[1], 'w').write(config)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.write(config)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 print('OK')
 " "$CONFIG" "$groupname" "$value"
 
@@ -1678,6 +1736,7 @@ print('OK')
             ;;
 
         juniper-class)
+            validate_class_name "$value"
             # Find the junos-exec service for this group and update its local-user-name
             python3 -c "
 import re, sys
@@ -1708,7 +1767,11 @@ if old_match:
         '\"' + new_class + '\" must match'
     )
 
-open(sys.argv[1], 'w').write(config)
+import tempfile, os
+tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(sys.argv[1]), delete=False)
+tmp.write(config)
+tmp.close()
+os.rename(tmp.name, sys.argv[1])
 print('OK')
 " "$CONFIG" "$groupname" "$value"
 
@@ -2435,7 +2498,7 @@ cmd_install() {
     echo "  Shared Secret Configuration"
     echo "--------------------------------------------"
     local SHARED_SECRET=""
-    read -rp "Enter shared secret (leave blank to auto-generate): " SHARED_SECRET
+    SHARED_SECRET=$(read_password_masked "  Enter shared secret (leave blank to auto-generate): ")
     if [[ -z "$SHARED_SECRET" ]]; then
         SHARED_SECRET=$(openssl rand -hex 16)
         info "Generated shared secret: ${SHARED_SECRET}"
@@ -2457,10 +2520,10 @@ cmd_install() {
 
         echo ""
         echo "  User: ${username} (${access})"
-        read -rp "  Enter password (leave blank to auto-generate): " password
+        password=$(read_password_masked "  Enter password (leave blank to auto-generate): ")
         if [[ -z "$password" ]]; then
             password=$(openssl rand -base64 18)
-            echo "  Generated password: ${password}"
+            echo -e "  Generated password: ${BOLD}${password}${NC}"
         fi
 
         local hash
@@ -2546,7 +2609,8 @@ cmd_install() {
     echo "    operations   (operator)    password: ${PW_OPERATIONS}"
     echo "    engineering  (super-user)  password: ${PW_ENGINEERING}"
     echo ""
-    echo "  SAVE THESE CREDENTIALS — they are not stored in plaintext."
+    echo -e "  ${RED}SAVE THESE CREDENTIALS — they are not stored in plaintext.${NC}"
+    echo -e "  ${YELLOW}Clear your terminal after recording: history -c && clear${NC}"
     echo ""
     echo "  Next steps:"
     echo "    1. Configure your Cisco/Juniper devices (see README.md)"
