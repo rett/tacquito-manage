@@ -1221,6 +1221,58 @@ set system accounting destination tacplus"
 }
 
 # --- CONFIG ALLOW/DENY PREFIX FILTERS ---
+# --- CONFIG BRANCH ---
+cmd_config_branch() {
+    local new_branch="${1:-}"
+
+    if [[ ! -d "${DEPLOY_DIR}/.git" ]]; then
+        error "Deploy directory not found at ${DEPLOY_DIR}."
+        exit 1
+    fi
+
+    local current_branch
+    current_branch=$(git -C "$DEPLOY_DIR" branch --show-current 2>/dev/null)
+
+    if [[ -z "$new_branch" ]]; then
+        echo ""
+        echo -e "  ${BOLD}Current branch:${NC} ${current_branch}"
+        echo ""
+        echo "  Available remote branches:"
+        git -C "$DEPLOY_DIR" fetch --quiet 2>/dev/null || true
+        git -C "$DEPLOY_DIR" branch -r 2>/dev/null | grep -v HEAD | sed 's|origin/||' | while IFS= read -r b; do
+            b=$(echo "$b" | xargs)
+            if [[ "$b" == "$current_branch" ]]; then
+                echo -e "    ${GREEN}* ${b}${NC}"
+            else
+                echo "      ${b}"
+            fi
+        done
+        echo ""
+        return
+    fi
+
+    if [[ "$new_branch" == "$current_branch" ]]; then
+        info "Already on branch '${new_branch}'."
+        return
+    fi
+
+    # Fetch and switch
+    git -C "$DEPLOY_DIR" fetch --quiet 2>/dev/null || true
+    if ! git -C "$DEPLOY_DIR" rev-parse --verify "origin/${new_branch}" &>/dev/null; then
+        error "Branch '${new_branch}' does not exist on remote."
+        exit 1
+    fi
+
+    git -C "$DEPLOY_DIR" checkout -- . 2>/dev/null || true
+    git -C "$DEPLOY_DIR" checkout "$new_branch" 2>/dev/null || git -C "$DEPLOY_DIR" checkout -b "$new_branch" "origin/${new_branch}" 2>/dev/null
+    git -C "$DEPLOY_DIR" pull --quiet 2>/dev/null || true
+    chmod 755 "${DEPLOY_DIR}/bin/tacctl.sh"
+
+    info "Switched to branch '${new_branch}'."
+    info "Run 'tacctl upgrade' to apply any changes."
+    echo ""
+}
+
 cmd_config_prefix_filter() {
     local key="$1"
     local subcmd="${2:-list}"
@@ -1378,6 +1430,9 @@ cmd_config() {
         deny)
             cmd_config_prefix_filter "prefix_deny" "$@"
             ;;
+        branch)
+            cmd_config_branch "$@"
+            ;;
         *)
             echo ""
             echo -e "${BOLD}Config Commands${NC}"
@@ -1396,6 +1451,7 @@ cmd_config() {
             echo "  deny list|add|remove           Manage connection deny list (IP ACL)"
             echo "  cisco                         Show working Cisco device configuration"
             echo "  juniper                       Show working Juniper device configuration"
+            echo "  branch [name]                 Show or change the tacctl repo branch"
             echo ""
             echo "Examples:"
             echo "  tacctl config show"
