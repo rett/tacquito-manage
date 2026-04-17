@@ -51,6 +51,7 @@ tacctl/
 | `/usr/local/bin/tacctl` | Symlink to management CLI |
 | `/usr/local/bin/tacquito-hashgen` | Password hash generator |
 | `/etc/tacquito/templates/` | Custom device config templates (override defaults) |
+| `/etc/tacquito/password-max-age` | Password age warning threshold (days) |
 | `/opt/tacctl/` | Git clone of this repo (used by upgrade) |
 | `/opt/tacquito-src/` | Tacquito server source code |
 
@@ -138,8 +139,8 @@ tacctl user add jsmith superuser --hash '$2b$12$...'
 ### Top-Level Commands
 
 ```
-tacctl install                 # Install tacquito server from scratch
-tacctl upgrade                 # Pull latest source, rebuild, update scripts
+tacctl install [--branch name]  # Install tacquito server from scratch
+tacctl upgrade [--branch name]  # Pull latest source, rebuild, update scripts
 tacctl uninstall               # Remove tacquito and all associated files
 tacctl status                  # Service health, stats, errors, password age warnings
 tacctl user <subcommand>       # User management
@@ -199,6 +200,7 @@ config password-age [days]           Show or set password age warning threshold 
 config prefixes [cidr,...]           Change allowed device subnets
 config allow list|add|remove         Manage connection allow list (IP ACL)
 config deny list|add|remove          Manage connection deny list (IP ACL)
+config branch [name]                 Show or change the tacctl repo branch
 ```
 
 **Connection filters:** `deny` takes precedence over `allow`. Both empty = all connections accepted.
@@ -291,6 +293,9 @@ sudo rm /etc/tacquito/templates/cisco.template
 
 ```bash
 tacctl upgrade
+
+# Switch to a specific branch during upgrade
+tacctl upgrade --branch develop
 ```
 
 The upgrade command:
@@ -299,6 +304,8 @@ The upgrade command:
 3. Updates system config files (service unit, logrotate, README) if changed
 4. Restarts the service only if something changed
 5. Re-executes itself if tacctl was updated during the pull
+
+Use `--branch` to switch to a different branch (e.g., `develop` for pre-release features). You can also switch branches without upgrading: `tacctl config branch <name>`.
 
 `/usr/local/bin/tacctl` is symlinked to `/opt/tacctl/bin/tacctl.sh`, so git pulls update it instantly.
 
