@@ -2445,6 +2445,9 @@ cmd_install() {
         git clone --quiet "$MANAGE_REPO" "$DEPLOY_DIR"
         info "Management repo cloned to ${DEPLOY_DIR}"
     fi
+    # Ensure git safe.directory is set for sudo operations
+    git config --global --add safe.directory "$DEPLOY_DIR" 2>/dev/null || true
+    git config --global --add safe.directory "$TACQUITO_SRC" 2>/dev/null || true
 
     # Symlink management CLI
     ln -sf "${DEPLOY_DIR}/bin/tacctl.sh" /usr/local/bin/tacctl
@@ -2643,6 +2646,10 @@ cmd_upgrade() {
     fi
 
     export PATH=$PATH:/usr/local/go/bin
+
+    # Ensure git safe.directory is set for sudo operations
+    git config --global --add safe.directory "$DEPLOY_DIR" 2>/dev/null || true
+    git config --global --add safe.directory "$TACQUITO_SRC" 2>/dev/null || true
 
     local PROJECT_DIR
     PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
