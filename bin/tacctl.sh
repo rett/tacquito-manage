@@ -67,6 +67,15 @@ get_version() {
     git -C "${script_dir}/.." describe --tags --always --dirty 2>/dev/null || echo "unknown"
 }
 
+# Normalize DEPLOY_DIR perms after git clone/pull. The script runs with
+# umask 077 by default, so git creates files 0600 -- which blocks non-root
+# users from reading README.md and templates. `a+rX` adds world read and
+# directory traversal without granting exec on data files.
+normalize_deploy_perms() {
+    [[ -d "$DEPLOY_DIR" ]] || return 0
+    chmod -R a+rX "$DEPLOY_DIR" 2>/dev/null || true
+}
+
 # --- Pre-flight ---
 preflight() {
     if [[ ! -f "$CONFIG" ]]; then
@@ -2824,6 +2833,7 @@ cmd_install() {
         git clone --quiet $branch_flag "$MANAGE_REPO" "$DEPLOY_DIR"
         info "Management repo cloned to ${DEPLOY_DIR}"
     fi
+    normalize_deploy_perms
     # Ensure git safe.directory is set for sudo operations
     git config --global --add safe.directory "$DEPLOY_DIR" 2>/dev/null || true
     git config --global --add safe.directory "$TACQUITO_SRC" 2>/dev/null || true
@@ -2879,7 +2889,9 @@ cmd_install() {
 
     mkdir -p "$CONFIG_DIR" "$LOG_DIR"
     chown tacquito:tacquito "$CONFIG_DIR" "$LOG_DIR"
-    chmod 750 "$CONFIG_DIR" "$LOG_DIR"
+    # CONFIG_DIR is world-traversable so everyone can read README.md; sensitive files inside (tacquito.yaml, backups) are 0640 and stay protected by their own perms. LOG_DIR stays 0750.
+    chmod 755 "$CONFIG_DIR"
+    chmod 750 "$LOG_DIR"
 
     # --- Step 5: Generate shared secret ---
     local SHARED_SECRET
@@ -3075,6 +3087,7 @@ cmd_upgrade() {
             cp "${DEPLOY_DIR}/bin/tacctl.sh" "$SELF_TMP"
 
             git pull --quiet 2>/dev/null
+            normalize_deploy_perms
             info "Management scripts updated: $(git rev-parse --short HEAD)"
 
             # If tacctl changed, re-run the new version
@@ -3090,6 +3103,7 @@ cmd_upgrade() {
     elif [[ ! -d "$DEPLOY_DIR" ]]; then
         info "Cloning management repo..."
         git clone --quiet "$MANAGE_REPO" "$DEPLOY_DIR" 2>/dev/null || warn "Failed to clone management repo."
+        normalize_deploy_perms
     fi
 
     # --- Ensure symlink exists (755 so non-root users can exec into sudo) ---
@@ -3164,6 +3178,8 @@ cmd_upgrade() {
     update_if_changed "${ACTIVE_DEPLOY_DIR}/config/tacquito.logrotate" "/etc/logrotate.d/tacquito" "logrotate config"
     update_if_changed "${ACTIVE_DEPLOY_DIR}/config/tacctl.bash-completion" "/etc/bash_completion.d/tacctl" "bash completion"
     chmod 644 /etc/bash_completion.d/tacctl 2>/dev/null || true
+    # Older installs left CONFIG_DIR at 0750, which blocks non-root reads of README.md; normalize to 0755 (sensitive files inside stay 0640).
+    chmod 755 "$CONFIG_DIR" 2>/dev/null || true
 
     # Update default config templates (only if user hasn't customized them)
     if [[ -d "${ACTIVE_DEPLOY_DIR}/config/templates" ]]; then
