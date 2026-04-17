@@ -15,8 +15,6 @@
 #   ./tacctl.sh verify <username>
 #   ./tacctl.sh config show
 #   ./tacctl.sh config secret [new-secret]
-#   ./tacctl.sh config juniper-ro [class-name]
-#   ./tacctl.sh config juniper-rw [class-name]
 #   ./tacctl.sh config prefixes [cidr,cidr,...]
 #
 set -euo pipefail
@@ -875,76 +873,6 @@ cmd_config_secret() {
     echo ""
 }
 
-# --- CONFIG JUNIPER-RO ---
-cmd_config_juniper_ro() {
-    local new_class="${1:-}"
-
-    if [[ -z "$new_class" ]]; then
-        local current
-        current=$(get_config_value "juniper-ro")
-        read -rp "  Enter new Juniper read-only class name [current: ${current}]: " new_class
-        if [[ -z "$new_class" ]]; then
-            info "No change."
-            return
-        fi
-    fi
-
-    validate_class_name "$new_class"
-
-    local old_class
-    old_class=$(get_config_value "juniper-ro")
-
-    backup_config
-
-    # Update the junos_exec_readonly service value
-    sed -i "/junos_exec_readonly:/,/values:/{s|values: \[\"${old_class}\"\]|values: [\"${new_class}\"]|}" "$CONFIG"
-
-    # Update the comment above it
-    sed -i "s|\"${old_class}\" must match a local template user|\"${new_class}\" must match a local template user|" "$CONFIG"
-
-    chown tacquito:tacquito "$CONFIG"
-
-    restart_service
-    info "Juniper read-only class changed: ${old_class} -> ${new_class}"
-    warn "Update Juniper devices: set system login user ${new_class} class read-only"
-    echo ""
-}
-
-# --- CONFIG JUNIPER-RW ---
-cmd_config_juniper_rw() {
-    local new_class="${1:-}"
-
-    if [[ -z "$new_class" ]]; then
-        local current
-        current=$(get_config_value "juniper-rw")
-        read -rp "  Enter new Juniper super-user class name [current: ${current}]: " new_class
-        if [[ -z "$new_class" ]]; then
-            info "No change."
-            return
-        fi
-    fi
-
-    validate_class_name "$new_class"
-
-    local old_class
-    old_class=$(get_config_value "juniper-rw")
-
-    backup_config
-
-    # Update the junos_exec_superuser service value
-    sed -i "/junos_exec_superuser:/,/values:/{s|values: \[\"${old_class}\"\]|values: [\"${new_class}\"]|}" "$CONFIG"
-
-    # Update the comment above it
-    sed -i "s|\"${old_class}\" must match a local template user|\"${new_class}\" must match a local template user|" "$CONFIG"
-
-    chown tacquito:tacquito "$CONFIG"
-
-    restart_service
-    info "Juniper super-user class changed: ${old_class} -> ${new_class}"
-    warn "Update Juniper devices: set system login user ${new_class} class super-user"
-    echo ""
-}
-
 # --- CONFIG PREFIXES ---
 cmd_config_prefixes() {
     local new_prefixes="${1:-}"
@@ -1353,12 +1281,6 @@ cmd_config() {
         secret)
             cmd_config_secret "$@"
             ;;
-        juniper-ro)
-            cmd_config_juniper_ro "$@"
-            ;;
-        juniper-rw)
-            cmd_config_juniper_rw "$@"
-            ;;
         prefixes)
             cmd_config_prefixes "$@"
             ;;
@@ -1399,8 +1321,6 @@ cmd_config() {
             echo "  loglevel [debug|info|error]    Show or change log level"
             echo "  password-age [days]           Show or set password age warning threshold"
             echo "  secret [new-secret]           Change shared secret"
-            echo "  juniper-ro [class-name]       Change Juniper read-only class name"
-            echo "  juniper-rw [class-name]       Change Juniper super-user class name"
             echo "  prefixes [cidr,cidr,...]       Change allowed device subnets"
             echo "  allow list|add|remove          Manage connection allow list (IP ACL)"
             echo "  deny list|add|remove           Manage connection deny list (IP ACL)"

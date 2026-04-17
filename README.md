@@ -122,8 +122,6 @@ config diff [timestamp]              Diff current config vs a backup
 config secret [value]                Change shared secret
 config loglevel [debug|info|error]   Show or change log level
 config password-age [days]           Show or set password age warning threshold (default 90)
-config juniper-ro [class]            Change Juniper read-only class name
-config juniper-rw [class]            Change Juniper super-user class name
 config prefixes [cidr,...]           Change allowed device subnets
 config allow list|add|remove         Manage connection allow list (IP ACL)
 config deny list|add|remove          Manage connection deny list (IP ACL)
