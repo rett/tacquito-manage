@@ -594,7 +594,7 @@ cmd_enable() {
     local saved_hash_file="${BACKUP_DIR}/disabled/${username}.hash"
     if [[ ! -f "$saved_hash_file" ]]; then
         error "No saved hash found for '${username}'. Set a new password instead:"
-        error "  sudo ./tacctl.sh passwd ${username}"
+        error "  tacctl user passwd ${username}"
         exit 1
     fi
 
@@ -1220,7 +1220,6 @@ set system accounting destination tacplus"
     echo ""
 }
 
-# --- CONFIG ALLOW/DENY PREFIX FILTERS ---
 # --- CONFIG BRANCH ---
 cmd_config_branch() {
     local new_branch="${1:-}"
@@ -1273,6 +1272,7 @@ cmd_config_branch() {
     echo ""
 }
 
+# --- CONFIG ALLOW/DENY PREFIX FILTERS ---
 cmd_config_prefix_filter() {
     local key="$1"
     local subcmd="${2:-list}"
@@ -2527,11 +2527,8 @@ cmd_install() {
         cd "$DEPLOY_DIR"
         [[ -n "$INSTALL_BRANCH" ]] && git checkout "$INSTALL_BRANCH" &>/dev/null || true
         git pull --quiet 2>/dev/null || true
-    elif [[ -d "$DEPLOY_DIR" ]]; then
-        rm -rf "$DEPLOY_DIR"
-        git clone --quiet $branch_flag "$MANAGE_REPO" "$DEPLOY_DIR"
-        info "Management repo cloned to ${DEPLOY_DIR}"
     else
+        [[ -d "$DEPLOY_DIR" ]] && rm -rf "$DEPLOY_DIR"
         git clone --quiet $branch_flag "$MANAGE_REPO" "$DEPLOY_DIR"
         info "Management repo cloned to ${DEPLOY_DIR}"
     fi
@@ -2622,13 +2619,13 @@ os.rename(tmp.name, config_path)
     chmod 700 "${BACKUP_DIR}/disabled"
     chown tacquito:tacquito "$BACKUP_DIR" "$PASSWORD_DATES_DIR"
 
-    # --- Step 8: Install systemd service ---
+    # --- Step 7: Install systemd service ---
     info "Installing systemd service..."
     cp "${PROJECT_DIR}/config/tacquito.service" "$SERVICE_FILE"
     systemctl daemon-reload
     systemctl enable tacquito.service
 
-    # --- Step 9: Start the service ---
+    # --- Step 8: Start the service ---
     info "Starting tacquito..."
     systemctl start tacquito.service
     sleep 2
@@ -2640,7 +2637,7 @@ os.rename(tmp.name, config_path)
         exit 1
     fi
 
-    # --- Step 10: Verify ---
+    # --- Step 9: Verify ---
     local LISTEN_CHECK
     LISTEN_CHECK=$(ss -tlnp | grep ":49 " || true)
     if [[ -n "$LISTEN_CHECK" ]]; then
