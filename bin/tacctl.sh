@@ -29,6 +29,10 @@ PASSWORD_DATES_DIR="/etc/tacquito/backups/password-dates"
 ACCT_LOG="/var/log/tacquito/accounting.log"
 PASSWORD_MAX_AGE_DAYS=90
 PASSWORD_MAX_AGE_FILE="/etc/tacquito/password-max-age"
+BCRYPT_COST=12
+BCRYPT_COST_FILE="/etc/tacquito/bcrypt-cost"
+PASSWORD_MIN_LENGTH=12
+SECRET_MIN_LENGTH=16
 CONFIG_DIR="/etc/tacquito"
 LOG_DIR="/var/log/tacquito"
 SERVICE_FILE="/etc/systemd/system/tacquito.service"
@@ -49,6 +53,34 @@ GO_BIN="/usr/local/go/bin/go"
 if [[ -r "$PASSWORD_MAX_AGE_FILE" ]]; then
     PASSWORD_MAX_AGE_DAYS=$(cat "$PASSWORD_MAX_AGE_FILE" 2>/dev/null || echo "$PASSWORD_MAX_AGE_DAYS")
 fi
+
+# Load custom bcrypt cost. Default 12 follows OWASP 2025 guidance (≈300ms
+# on modern CPUs). Existing hashes at lower cost continue to verify —
+# bcrypt encodes cost in the hash itself. Clamp to the safe range [10,14]
+# to avoid accidental DoS or downgrade.
+if [[ -r "$BCRYPT_COST_FILE" ]]; then
+    BCRYPT_COST=$(cat "$BCRYPT_COST_FILE" 2>/dev/null || echo "$BCRYPT_COST")
+fi
+if ! [[ "$BCRYPT_COST" =~ ^[0-9]+$ ]] || [[ "$BCRYPT_COST" -lt 10 || "$BCRYPT_COST" -gt 14 ]]; then
+    BCRYPT_COST=12
+fi
+
+# --- Disabled-user hash marker ---
+# For disabled users we write a well-formed but unverifiable bcrypt hash
+# rather than the legacy literal "DISABLED". The marker is '$2b$12$' +
+# 53 '.' chars (all-zero salt + all-zero digest) — valid bcrypt
+# structure that no real password can match. Stored hex-encoded.
+#
+# Legacy "DISABLED" values are still recognized on read (see is_disabled_hash).
+# Hex of "$2b$12$" + "." × 53:
+DISABLED_MARKER_HEX="24326224313224"
+DISABLED_MARKER_HEX+="2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e"
+DISABLED_MARKER_HEX+="2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e"
+
+# Return 0 if $1 is a disabled-user hash (legacy or new marker).
+is_disabled_hash() {
+    [[ "$1" == "DISABLED" || "$1" == "$DISABLED_MARKER_HEX" ]]
+}
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -184,28 +216,43 @@ backup_config() {
 }
 
 # --- Generate bcrypt hex hash from password ---
+# Password is passed via stdin (not argv) so it never lands in
+# /proc/<pid>/cmdline, which is world-readable on Linux by default.
 generate_hash() {
     local password="$1"
-    python3 -c "
+    printf '%s' "$password" | python3 -c '
 import bcrypt, binascii, sys
-h = bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt(rounds=10))
+pw = sys.stdin.buffer.read()
+rounds = int(sys.argv[1])
+h = bcrypt.hashpw(pw, bcrypt.gensalt(rounds=rounds))
 print(binascii.hexlify(h).decode())
-" "$password"
+' "$BCRYPT_COST"
 }
 
 # --- Verify a password against a stored hash ---
+# Password via stdin (see generate_hash rationale). Hash travels via argv
+# because it is already on-disk in the config; not additionally sensitive.
+# checkpw returns bool; we must honor it (previous code printed MATCH for
+# any input as long as the hash parsed).
 verify_hash() {
     local password="$1"
     local hexhash="$2"
-    python3 -c "
+    printf '%s' "$password" | python3 -c '
 import bcrypt, binascii, sys
-h = binascii.unhexlify(sys.argv[2])
+pw = sys.stdin.buffer.read()
 try:
-    bcrypt.checkpw(sys.argv[1].encode(), h)
-    print('MATCH')
+    h = binascii.unhexlify(sys.argv[1])
+except (binascii.Error, ValueError):
+    print("INVALID_HASH")
+    sys.exit(0)
+try:
+    if bcrypt.checkpw(pw, h):
+        print("MATCH")
+    else:
+        print("NO_MATCH")
 except ValueError:
-    print('INVALID_HASH')
-" "$password" "$hexhash" 2>/dev/null || echo "FAIL"
+    print("INVALID_HASH")
+' "$hexhash" 2>/dev/null || echo "FAIL"
 }
 
 # --- Validate class/value names ---
@@ -273,9 +320,11 @@ OVERRIDE_DIR="/etc/systemd/system/tacquito.service.d"
 OVERRIDE_FILE="${OVERRIDE_DIR}/tacctl-overrides.conf"
 
 # Read an Environment= override; echo empty if not set.
+# `|| true` absorbs grep's exit-1-on-no-match so `pipefail + set -e`
+# callers don't abort when the override file doesn't exist / is empty.
 read_service_override() {
     local key="$1"
-    grep -oP "^Environment=\"${key}=\K[^\"]*" "$OVERRIDE_FILE" 2>/dev/null | tail -1
+    { grep -oP "^Environment=\"${key}=\K[^\"]*" "$OVERRIDE_FILE" 2>/dev/null || true; } | tail -1
 }
 
 # Write (or replace) an Environment= override for the given key.
@@ -304,6 +353,7 @@ clear_service_override() {
 }
 
 # --- Replace a user's hash in config (safe from sed injection) ---
+# Hash travels via argv (already stored in readable config on disk).
 replace_user_hash() {
     local username="$1"
     local new_hash="$2"
@@ -321,18 +371,27 @@ os.rename(tmp.name, config_path)
 }
 
 # --- Replace shared secret in config (safe from sed injection) ---
+# New secret is read from stdin so it does not appear in
+# /proc/<pid>/cmdline during the write.
 replace_secret() {
     local new_secret="$1"
-    python3 -c "
+    printf '%s' "$new_secret" | python3 -c '
 import re, sys, tempfile, os
-config_path, new_secret = sys.argv[1], sys.argv[2]
+config_path = sys.argv[1]
+new_secret = sys.stdin.read()
 config = open(config_path).read()
-config = re.sub(r'(key:\s*\")[^\"]*(\")' , r'\g<1>' + re.escape(new_secret) + r'\2', config, count=1)
-tmp = tempfile.NamedTemporaryFile('w', dir=os.path.dirname(config_path), delete=False)
+# Use a lambda replacement so regex metachars in the secret are not
+# interpreted as backreferences (\g<...>, \1, etc.).
+config = re.sub(
+    r"(key:\s*\")[^\"]*(\")",
+    lambda m: m.group(1) + new_secret + m.group(2),
+    config, count=1,
+)
+tmp = tempfile.NamedTemporaryFile("w", dir=os.path.dirname(config_path), delete=False)
 tmp.write(config)
 tmp.close()
 os.rename(tmp.name, config_path)
-" "$CONFIG" "$new_secret"
+' "$CONFIG"
 }
 
 # --- Check if user exists ---
@@ -384,14 +443,54 @@ read_password_masked() {
     echo "$password"
 }
 
+# --- Validate password strength for a user-chosen password ---
+# Auto-generated passwords bypass this (they're always long + mixed).
+# Returns 0 on accept, 1 on reject (with error printed).
+validate_password_strength() {
+    local password="$1"
+    local username="${2:-}"
+
+    if [[ "${#password}" -lt "$PASSWORD_MIN_LENGTH" ]]; then
+        error "Password is ${#password} characters; minimum is ${PASSWORD_MIN_LENGTH}."
+        return 1
+    fi
+
+    local lower="${password,,}"
+    # Reject the usual suspects. Lowercase-fold first so variants ("Admin",
+    # "ADMIN") all match. Not a dictionary check — just the handful that
+    # dominate breach corpora.
+    case "$lower" in
+        admin|administrator|root|password|password1|passw0rd|\
+        tacacs|tacacs+|tacplus|tacquito|\
+        cisco|cisco123|juniper|juniper1|\
+        changeme|welcome|welcome1|letmein|qwerty*|abc123*|\
+        12345*|00000*|aaaaaa*)
+            error "Password is on the common-weak list. Choose another."
+            return 1
+            ;;
+    esac
+
+    if [[ -n "$username" && "$lower" == "${username,,}" ]]; then
+        error "Password must not equal the username."
+        return 1
+    fi
+
+    return 0
+}
+
 # --- Prompt for password ---
+# If $1 is given, it's the username — used for password-equals-username checks.
 prompt_password() {
+    local username="${1:-}"
     local password=""
     password=$(read_password_masked "  Enter password (leave blank to auto-generate): ")
     if [[ -z "$password" ]]; then
         password=$(openssl rand -base64 18)
         echo -e "  Generated password: ${BOLD}${password}${NC}" >&2
     else
+        if ! validate_password_strength "$password" "$username"; then
+            exit 1
+        fi
         local confirm=""
         confirm=$(read_password_masked "  Confirm password: ")
         if [[ "$password" != "$confirm" ]]; then
@@ -427,6 +526,7 @@ if not users_match:
 users_section = users_match.group(1)
 
 # Find all user entries within the users section
+DISABLED_MARKER = sys.argv[2]
 for m in re.finditer(r'- name: (\S+)\n.*?groups: \[\*(\w+)\]', users_section, re.DOTALL):
     username = m.group(1)
     group = m.group(2)
@@ -435,12 +535,12 @@ for m in re.finditer(r'- name: (\S+)\n.*?groups: \[\*(\w+)\]', users_section, re
     auth_match = re.search(r'^bcrypt_' + re.escape(username) + r':.*?hash:\s*(\S+)', config, re.MULTILINE | re.DOTALL)
     if auth_match:
         h = auth_match.group(1)
-        status = 'disabled' if h == 'DISABLED' else 'active'
+        status = 'disabled' if h == 'DISABLED' or h == DISABLED_MARKER else 'active'
     else:
         status = 'unknown'
 
     print(f'{username}|{group}|{status}')
-" "$CONFIG" | sort | while IFS='|' read -r username group status; do
+" "$CONFIG" "$DISABLED_MARKER_HEX" | sort | while IFS='|' read -r username group status; do
         local color="$GREEN"
         [[ "$status" == "disabled" ]] && color="$RED"
         [[ "$status" == "unknown" ]] && color="$YELLOW"
@@ -495,8 +595,9 @@ cmd_add() {
 
     if [[ -z "$hash" ]]; then
         local password
-        password=$(prompt_password)
+        password=$(prompt_password "$username")
         hash=$(generate_hash "$password")
+        unset password
     else
         info "Using pre-generated bcrypt hash."
     fi
@@ -650,8 +751,9 @@ cmd_passwd() {
 
     if [[ -z "$hash" ]]; then
         local password
-        password=$(prompt_password)
+        password=$(prompt_password "$username")
         hash=$(generate_hash "$password")
+        unset password
     else
         info "Using pre-generated bcrypt hash."
     fi
@@ -684,7 +786,7 @@ cmd_disable() {
 
     local current_hash
     current_hash=$(get_user_hash "$username")
-    if [[ "$current_hash" == "DISABLED" ]]; then
+    if is_disabled_hash "$current_hash"; then
         warn "User '${username}' is already disabled."
         exit 0
     fi
@@ -697,7 +799,7 @@ cmd_disable() {
     echo "$current_hash" > "${BACKUP_DIR}/disabled/${username}.hash"
     chmod 600 "${BACKUP_DIR}/disabled/${username}.hash"
 
-    replace_user_hash "$username" "DISABLED"
+    replace_user_hash "$username" "$DISABLED_MARKER_HEX"
 
     chown tacquito:tacquito "$CONFIG"
 
@@ -722,7 +824,7 @@ cmd_enable() {
 
     local current_hash
     current_hash=$(get_user_hash "$username")
-    if [[ "$current_hash" != "DISABLED" ]]; then
+    if ! is_disabled_hash "$current_hash"; then
         warn "User '${username}' is not disabled."
         exit 0
     fi
@@ -766,7 +868,7 @@ cmd_show() {
     local group stored_hash status pw_date pw_age last_login
     group=$(get_user_group "$username")
     stored_hash=$(get_user_hash "$username")
-    if [[ "$stored_hash" == "DISABLED" ]]; then
+    if is_disabled_hash "$stored_hash"; then
         status="disabled"
     else
         status="active"
@@ -810,7 +912,7 @@ PY
 
     # Hash fingerprint: the hash is stored hex-encoded in the YAML ("24326224313024..." = "$2b$10$..."). Decode the first 7 bcrypt chars (14 hex chars) to surface algorithm + cost without disclosing salt or digest.
     local hash_prefix=""
-    if [[ -n "$stored_hash" && "$stored_hash" != "DISABLED" ]]; then
+    if [[ -n "$stored_hash" ]] && ! is_disabled_hash "$stored_hash"; then
         hash_prefix=$(echo "${stored_hash:0:14}" | xxd -r -p 2>/dev/null)
     fi
 
@@ -854,7 +956,7 @@ cmd_verify() {
     local stored_hash
     stored_hash=$(get_user_hash "$username")
     local status="active"
-    [[ "$stored_hash" == "DISABLED" ]] && status="disabled"
+    is_disabled_hash "$stored_hash" && status="disabled"
     local pw_date
     pw_date=$(get_password_date "$username")
 
@@ -877,9 +979,23 @@ cmd_verify() {
 
     local result
     result=$(verify_hash "$password" "$stored_hash")
+    unset password
+
+    # SUDO_UID is the invoking user's uid when run via sudo; falls back to
+    # the current EUID (root/0) for direct-as-root invocations.
+    local caller_uid="${SUDO_UID:-$EUID}"
+    local caller_name="${SUDO_USER:-root}"
+
     if [[ "$result" == "MATCH" ]]; then
+        logger -t tacctl -p auth.info \
+            "verify OK user=${username} by=${caller_name}(uid=${caller_uid})" 2>/dev/null || true
         info "Password is correct."
     else
+        # Rate-limit failures so the CLI isn't usable as a local bcrypt
+        # oracle. 500ms is cheap for humans, expensive for scripted guessing.
+        sleep 0.5
+        logger -t tacctl -p auth.warning \
+            "verify FAIL user=${username} result=${result} by=${caller_name}(uid=${caller_uid})" 2>/dev/null || true
         error "Password does not match."
     fi
     echo ""
@@ -1140,12 +1256,35 @@ else:
 # --- CONFIG SECRET ---
 cmd_config_secret() {
     local new_secret="${1:-}"
+    local auto_generated="false"
 
     if [[ -z "$new_secret" ]]; then
         read -rp "  Enter new shared secret (leave blank to auto-generate): " new_secret
         if [[ -z "$new_secret" ]]; then
             new_secret=$(openssl rand -base64 24)
+            auto_generated="true"
             echo -e "  Generated: ${BOLD}${new_secret}${NC}"
+        fi
+    fi
+
+    # Length floor per Cisco TACACS+ guidance (≥16 chars). Auto-generated
+    # secrets always exceed this, so the check only bites on user input.
+    if [[ "${#new_secret}" -lt "$SECRET_MIN_LENGTH" ]]; then
+        error "Shared secret is ${#new_secret} characters; minimum is ${SECRET_MIN_LENGTH}."
+        error "(Cisco/RFC 8907 guidance. Leave blank to auto-generate a strong secret.)"
+        exit 1
+    fi
+
+    # Cheap entropy sanity check: reject single-class (all-lower / all-digit)
+    # inputs. Auto-generated secrets from `openssl rand -base64` always mix
+    # classes, so this only fires on trivially weak user input.
+    if [[ "$auto_generated" != "true" ]]; then
+        if [[ "$new_secret" =~ ^[a-z]+$ ]] || \
+           [[ "$new_secret" =~ ^[A-Z]+$ ]] || \
+           [[ "$new_secret" =~ ^[0-9]+$ ]]; then
+            error "Shared secret is single-character-class (low entropy). Reject."
+            error "Mix letters, digits, and punctuation, or leave blank to auto-generate."
+            exit 1
         fi
     fi
 
@@ -1157,6 +1296,9 @@ cmd_config_secret() {
     restart_service
     info "Shared secret updated."
     warn "Update ALL network devices with the new secret: ${new_secret}"
+    warn "Rotation procedure: (1) stage new secret on each device with a"
+    warn "second 'tacacs-server host' entry, (2) apply here, (3) remove the"
+    warn "old entry on devices. Otherwise in-flight auth will fail."
     echo ""
 }
 
@@ -1299,12 +1441,18 @@ privilege exec level ${privlvl} terminal no monitor
     else
         cat <<EOF
 ! --- TACACS+ Server & AAA ---
+service password-encryption
+!
 aaa new-model
+!
+! Replace <MGMT_IF> with your management source interface.
+ip tacacs source-interface <MGMT_IF>
 !
 tacacs server TACACS
   address ipv4 ${server_ip}
   key ${secret}
   single-connection
+  timeout 5
 !
 aaa group server tacacs+ TACACS-GROUP
   server name TACACS
@@ -1312,11 +1460,25 @@ aaa group server tacacs+ TACACS-GROUP
 aaa authentication login default group TACACS-GROUP local
 aaa authorization exec default group TACACS-GROUP local if-authenticated
 aaa accounting exec default start-stop group TACACS-GROUP
+aaa accounting commands 1 default start-stop group TACACS-GROUP
+aaa accounting commands 7 default start-stop group TACACS-GROUP
 aaa accounting commands 15 default start-stop group TACACS-GROUP
 !
 ${PRIVILEGE_COMMANDS}
+! --- VTY ACL (edit permits to match mgmt subnets) ---
+ip access-list standard VTY-ACL
+  permit 10.0.0.0 0.255.255.255
+  deny   any log
+!
+line con 0
+  login authentication default
+  exec-timeout 60 0
+!
 line vty 0 15
   login authentication default
+  transport input ssh
+  access-class VTY-ACL in
+  exec-timeout 60 0
 EOF
     fi
 
@@ -1328,6 +1490,12 @@ EOF
     echo -e "${YELLOW}Notes:${NC}"
     echo "  - The 'local' fallback ensures access if TACACS+ is unreachable"
     echo "  - Ensure a local admin account exists as a backup"
+    echo "  - Replace <MGMT_IF> with your management interface (e.g. Loopback0)"
+    echo "  - Edit VTY-ACL permits to match your operator subnets"
+    echo "  - For Type 6 (AES) key encryption, run on the device first:"
+    echo "      conf t ; key config-key password-encrypt <master-key>"
+    echo "      password encryption aes"
+    echo "    then re-enter the tacacs key. (Type 7 is trivially reversible.)"
     echo "  - Custom privilege levels (2-14) require the 'privilege exec level' mappings above"
     echo "  - Adjust mapped commands to suit your operational needs"
     if [[ -n "$template_file" ]]; then
@@ -1380,11 +1548,16 @@ for m in re.finditer(r'^(\w+): &\1\n  name: \1\n  services:\n(.*?)  accounter:',
     TEMPLATE_USERS="${TEMPLATE_USERS%$'\n'}"
 
     local TACPLUS_CONFIG
-    # `delete` first because Junos `set ... authentication-order` is additive against an existing ordered list.
+    # `delete` first because Junos `set ... authentication-order` is
+    # additive against an existing ordered list.
+    # source-address pins the client source IP so prefix-based ACLs on
+    # tacquito have a stable match. <MGMT_IP> must be replaced with the
+    # device's management interface address (e.g. lo0 or fxp0).
     TACPLUS_CONFIG="delete system authentication-order
 set system authentication-order [ tacplus password ]
 set system tacplus-server ${server_ip} secret ${secret}
 set system tacplus-server ${server_ip} single-connection
+set system tacplus-server ${server_ip} source-address <MGMT_IP>
 set system accounting events [ login change-log interactive-commands ]
 set system accounting destination tacplus"
 
@@ -1434,6 +1607,10 @@ set system accounting destination tacplus"
     echo "  - The 'password' fallback in authentication-order ensures local access"
     echo "  - If a login fails silently, the template user is likely missing"
     echo "  - Adjust the Junos class (read-only/operator/super-user) as needed"
+    echo "  - Replace <MGMT_IP> with the device's management interface address"
+    echo "  - Junos replaces the plaintext 'secret' with '\$9\$...' on commit,"
+    echo "    but it sits in the candidate config until then — commit promptly"
+    echo "    and protect the commit archive (/config/rescue.conf, juniper.conf.*)."
     if [[ -n "$template_file" ]]; then
         echo "  - Using template: ${template_file}"
     fi
@@ -1650,6 +1827,9 @@ cmd_config() {
         password-age)
             cmd_config_password_age "$@"
             ;;
+        bcrypt-cost)
+            cmd_config_bcrypt_cost "$@"
+            ;;
         diff)
             cmd_backup diff "$@"
             ;;
@@ -1676,6 +1856,7 @@ cmd_config() {
             echo "  listen [show|tcp|tcp6|reset] [addr]  Show, change, or reset TCP listen address"
             echo "  sudoers [show|install|remove] [grp]  Manage NOPASSWD sudoers drop-in for tacctl"
             echo "  password-age [days]                  Show or set password age warning threshold"
+            echo "  bcrypt-cost [10-14]                  Show or set bcrypt cost factor (default 12)"
             echo "  secret [new-secret]                  Change shared secret"
             echo "  prefixes [cidr,cidr,...]             Change allowed device subnets"
             echo "  allow list|add|remove                Manage connection allow list (IP ACL)"
@@ -2155,8 +2336,11 @@ cmd_status() {
     fi
 
     # Log level
+    # Tolerate no-match: when tacquito is launched with ${TACQUITO_LEVEL}
+    # rather than a literal -level flag, grep finds nothing and (under
+    # pipefail + set -e) would abort status. `|| true` absorbs that.
     local loglevel
-    loglevel=$(systemctl show tacquito --property=ExecStart 2>/dev/null | grep -oP '\-level \K\d+')
+    loglevel=$(systemctl show tacquito --property=ExecStart 2>/dev/null | grep -oP '\-level \K\d+' || true)
     local level_name="unknown"
     case "$loglevel" in
         10) level_name="error" ;;
@@ -2229,6 +2413,84 @@ else:
         echo -e "    ${GREEN}No errors in the last 24 hours${NC}"
     fi
 
+    # Security posture — prefix scope + IPv6/IPv4 ACL parity + secret
+    echo ""
+    echo -e "  ${BOLD}Security Posture:${NC}"
+    local posture_json
+    posture_json=$(python3 - "$CONFIG" <<'PY' 2>/dev/null
+import re, sys
+cfg = open(sys.argv[1]).read()
+
+# Extract the 'prefixes: |' block inside the secrets section.
+pm = re.search(r'prefixes:\s*\|\s*\n\s*\[(.*?)\]', cfg, re.DOTALL)
+cidrs = []
+if pm:
+    cidrs = re.findall(r'"([^"]+)"', pm.group(1))
+
+# Same for prefix_allow / prefix_deny (flat inline list form).
+def flat_list(key):
+    m = re.search(r'^' + key + r':\s*\[(.*?)\]', cfg, re.MULTILINE)
+    return re.findall(r'"([^"]+)"', m.group(1)) if m and m.group(1).strip() else []
+allow = flat_list('prefix_allow')
+deny = flat_list('prefix_deny')
+
+def has_v6(lst):
+    return any(':' in c for c in lst)
+def has_v4(lst):
+    return any(':' not in c for c in lst)
+
+rfc1918 = {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+unrestricted = rfc1918.issubset(set(cidrs)) and len(cidrs) == 3
+
+print(f"prefix_count={len(cidrs)}")
+print(f"prefix_unrestricted={'1' if unrestricted else '0'}")
+print(f"prefix_has_v4={'1' if has_v4(cidrs) else '0'}")
+print(f"prefix_has_v6={'1' if has_v6(cidrs) else '0'}")
+print(f"allow_has_v4={'1' if has_v4(allow) else '0'}")
+print(f"allow_has_v6={'1' if has_v6(allow) else '0'}")
+PY
+)
+    local prefix_count=0 prefix_unrestricted=0 prefix_has_v6=0 allow_has_v6=0
+    if [[ -n "$posture_json" ]]; then
+        eval "$posture_json"
+    fi
+
+    if [[ "$prefix_unrestricted" == "1" ]]; then
+        echo -e "    ${RED}Prefix scope:       UNRESTRICTED (all RFC 1918 — harden with 'tacctl config prefixes')${NC}"
+    elif [[ "$prefix_count" -eq 0 ]]; then
+        echo -e "    ${RED}Prefix scope:       EMPTY (no clients can connect)${NC}"
+    else
+        echo -e "    ${GREEN}Prefix scope:       ${prefix_count} CIDR(s)${NC}"
+    fi
+
+    # IPv6 parity warning: if the listener is tcp6 but no IPv6 CIDR exists
+    # anywhere in prefixes/allow, IPv4-mapped addresses can bypass ACLs.
+    local listener_net
+    listener_net=$(read_service_override TACQUITO_NETWORK)
+    listener_net=${listener_net:-tcp}
+    if [[ "$listener_net" == "tcp6" ]]; then
+        if [[ "$prefix_has_v6" != "1" && "$allow_has_v6" != "1" ]]; then
+            echo -e "    ${RED}IPv6 ACL parity:    MISSING (listener is tcp6 but no IPv6 CIDRs — v4-mapped clients bypass ACLs)${NC}"
+        else
+            echo -e "    ${GREEN}IPv6 ACL parity:    present${NC}"
+        fi
+    fi
+
+    # Shared-secret sanity: flag anything ≤ 8 chars or containing REPLACE.
+    local cur_secret
+    cur_secret=$(python3 -c "
+import re, sys
+m = re.search(r'^\s+key:\s+\"([^\"]*)\"', open(sys.argv[1]).read(), re.MULTILINE)
+print(m.group(1) if m else '')
+" "$CONFIG" 2>/dev/null || true)
+    if [[ "$cur_secret" == *REPLACE* ]]; then
+        echo -e "    ${RED}Shared secret:      PLACEHOLDER (run 'tacctl config secret')${NC}"
+    elif [[ "${#cur_secret}" -lt "$SECRET_MIN_LENGTH" ]]; then
+        echo -e "    ${RED}Shared secret:      ${#cur_secret} chars (min recommended ${SECRET_MIN_LENGTH})${NC}"
+    else
+        echo -e "    ${GREEN}Shared secret:      ${#cur_secret} chars${NC}"
+    fi
+
     # Password age warnings
     echo ""
     echo -e "  ${BOLD}Password Age Warnings:${NC}"
@@ -2281,6 +2543,7 @@ cmd_config_validate() {
 import re, sys
 
 config = open(sys.argv[1]).read()
+DISABLED_MARKER = sys.argv[2]
 errors = []
 
 # Check for users section
@@ -2309,8 +2572,8 @@ if users_match:
             h = m.group(2)
             if h == 'REPLACE_ME':
                 errors.append(f'User \"{username}\" has placeholder hash (REPLACE_ME)')
-            elif h == 'DISABLED':
-                pass  # valid state
+            elif h == 'DISABLED' or h == DISABLED_MARKER:
+                pass  # valid state (legacy or well-formed marker)
             elif len(h) < 20:
                 errors.append(f'User \"{username}\" has suspiciously short hash')
 
@@ -2331,7 +2594,7 @@ if errors:
         print(f'ERROR:{e}')
 else:
     print('OK')
-" "$CONFIG")
+" "$CONFIG" "$DISABLED_MARKER_HEX")
 
     if [[ "$result" == "OK" ]]; then
         echo -e "  ${GREEN}Config structure:${NC}      valid"
@@ -2652,6 +2915,35 @@ cmd_config_password_age() {
     echo ""
 }
 
+# --- CONFIG BCRYPT-COST ---
+# Cost factor affects only NEW hashes; existing hashes verify at whatever
+# cost they were minted with. Higher = slower login + stronger.
+cmd_config_bcrypt_cost() {
+    local new_cost="${1:-}"
+
+    if [[ -z "$new_cost" ]]; then
+        echo ""
+        echo "  Bcrypt cost factor: ${BCRYPT_COST}"
+        echo "  (New hashes only — existing hashes keep their minted cost.)"
+        echo ""
+        echo "  Usage: tacctl config bcrypt-cost <10-14>"
+        echo "  Typical wall-clock on a modern CPU: 10≈100ms, 12≈300ms, 14≈1.2s"
+        echo ""
+        return
+    fi
+
+    if ! [[ "$new_cost" =~ ^[0-9]+$ ]] || [[ "$new_cost" -lt 10 || "$new_cost" -gt 14 ]]; then
+        error "Cost must be an integer between 10 and 14."
+        exit 1
+    fi
+
+    echo "$new_cost" > "$BCRYPT_COST_FILE"
+    chmod 644 "$BCRYPT_COST_FILE"
+    BCRYPT_COST="$new_cost"
+    info "Bcrypt cost set to ${new_cost}. Applies to new/changed passwords."
+    echo ""
+}
+
 # =====================================================================
 #  LOG COMMANDS
 # =====================================================================
@@ -2849,6 +3141,7 @@ cmd_hash() {
     password=$(prompt_password)
     local hash
     hash=$(generate_hash "$password")
+    unset password
     echo ""
     echo "  Bcrypt hash (provide this to your admin):"
     echo ""
