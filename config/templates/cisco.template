@@ -1,10 +1,22 @@
 ! --- TACACS+ Server & AAA ---
+! Encrypt Type 0 plaintext secrets in running-config.
+! (Type 7 is trivially reversible; for Type 6 AES encryption of the
+!  TACACS+ key, run 'key config-key password-encrypt <master>' first,
+!  then re-enter the key with 'key 6 <encrypted-string>'.)
+service password-encryption
+!
 aaa new-model
+!
+! Pin TACACS+ client to a known source interface so prefix-based ACLs on
+! the tacquito side have a stable source IP. Replace <MGMT_IF> with your
+! management interface (e.g. Loopback0, GigabitEthernet0/0).
+ip tacacs source-interface <MGMT_IF>
 !
 tacacs server TACACS
   address ipv4 ${SERVER_IP}
   key ${SECRET}
   single-connection
+  timeout 5
 !
 aaa group server tacacs+ TACACS-GROUP
   server name TACACS
@@ -12,14 +24,25 @@ aaa group server tacacs+ TACACS-GROUP
 aaa authentication login default group TACACS-GROUP local
 aaa authorization exec default group TACACS-GROUP local if-authenticated
 aaa accounting exec default start-stop group TACACS-GROUP
+aaa accounting commands 1 default start-stop group TACACS-GROUP
+aaa accounting commands 7 default start-stop group TACACS-GROUP
 aaa accounting commands 15 default start-stop group TACACS-GROUP
 !
 ${PRIVILEGE_COMMANDS}
-! --- VTY ACL (recommended) ---
-! Restrict management access to trusted subnets:
-!   ip access-list standard VTY-ACL
-!     permit <mgmt-subnet>
+! --- VTY ACL ---
+! Restrict management access to trusted subnets. Edit permits to match
+! your operator networks, then apply with 'access-class VTY-ACL in'.
+ip access-list standard VTY-ACL
+  remark Edit these permits to match your mgmt subnets
+  permit 10.0.0.0 0.255.255.255
+  deny   any log
+!
+line con 0
+  login authentication default
+  exec-timeout 10 0
 !
 line vty 0 15
   login authentication default
-!   access-class VTY-ACL in
+  transport input ssh
+  access-class VTY-ACL in
+  exec-timeout 10 0
