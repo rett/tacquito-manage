@@ -1886,10 +1886,27 @@ os.rename(tmp.name, sys.argv[1])
 # needed when the list changes. Survives upgrades because it lives
 # outside the template tree that `tacctl upgrade` rewrites.
 cmd_config_mgmt_acl() {
-    local subcmd="${1:-list}"
+    local subcmd="${1:-}"
     local cidr="${2:-}"
 
     case "$subcmd" in
+        ""|-h|--help|help)
+            local n=0
+            [[ -r "$MGMT_ACL_FILE" ]] && n=$(read_mgmt_acl_cidrs | wc -l)
+            echo ""
+            echo -e "${BOLD}tacctl config mgmt-acl${NC} — shared Cisco VTY-ACL + Juniper lo0-filter permits"
+            echo ""
+            echo "Usage:"
+            echo "  tacctl config mgmt-acl list                Show current permits"
+            echo "  tacctl config mgmt-acl add <cidr>          Append a CIDR (dedup, validated)"
+            echo "  tacctl config mgmt-acl remove <cidr>       Drop a CIDR"
+            echo "  tacctl config mgmt-acl clear               Wipe all permits (confirms)"
+            echo ""
+            echo "Storage: ${MGMT_ACL_FILE} (survives 'tacctl upgrade')."
+            echo "Current entries: ${n}"
+            echo ""
+            return
+            ;;
         list)
             echo ""
             echo -e "${BOLD}Management ACL (shared Cisco VTY-ACL + Juniper lo0 filter source)${NC}"
@@ -1984,15 +2001,8 @@ cmd_config_mgmt_acl() {
             echo ""
             ;;
         *)
-            echo ""
-            echo "Usage: tacctl config mgmt-acl <list|add|remove|clear> [cidr]"
-            echo ""
-            echo "Maintains a single permit list that drives both the Cisco"
-            echo "VTY-ACL and the Juniper lo0-filter example in the output of"
-            echo "'tacctl config cisco' and 'tacctl config juniper'. Stored at"
-            echo "  ${MGMT_ACL_FILE}"
-            echo "and preserved across 'tacctl upgrade'."
-            echo ""
+            error "Unknown subcommand: '${subcmd}'"
+            error "Run 'tacctl config mgmt-acl' with no arguments for help."
             exit 1
             ;;
     esac
