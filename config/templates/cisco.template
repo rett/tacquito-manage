@@ -38,5 +38,5 @@ line con 0
 line vty 0 15
   login authentication default
   transport input ssh
-  access-class VTY-ACL in
+${VTY_ACCESS_CLASS}
   exec-timeout 60 0

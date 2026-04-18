@@ -1457,7 +1457,14 @@ privilege exec level ${privlvl} terminal no monitor
     # Build the VTY-ACL block from the shared mgmt-acl list. IPv6 CIDRs
     # (if any) are skipped here — v6 would need an `ipv6 access-list`
     # and is not yet supported.
-    local VTY_ACL_BLOCK mgmt_entries=""
+    #
+    # Empty-list intentionally emits NO access-list (and a commented-out
+    # access-class below). Emitting a placeholder permit was misleading:
+    # pasting the output silently installed a bogus permit the operator
+    # didn't configure. Comments are no-ops on IOS, so the empty-state
+    # output is still safe to paste — it simply leaves the vty lines
+    # unchanged until mgmt-acl is populated.
+    local VTY_ACL_BLOCK VTY_ACCESS_CLASS mgmt_entries=""
     while IFS= read -r entry; do
         [[ -z "$entry" ]] && continue
         local wildcard
@@ -1470,12 +1477,13 @@ privilege exec level ${privlvl} terminal no monitor
         VTY_ACL_BLOCK="ip access-list standard VTY-ACL
   remark Managed by tacctl — edit with 'tacctl config mgmt-acl'
 ${mgmt_entries}  deny   any log"
+        VTY_ACCESS_CLASS="  access-class VTY-ACL in"
     else
-        VTY_ACL_BLOCK="! VTY-ACL empty — configure with 'tacctl config mgmt-acl add <cidr>'
-! Scaffold below is a placeholder; replace with real mgmt subnets.
-ip access-list standard VTY-ACL
-  permit 10.0.0.0 0.255.255.255
-  deny   any log"
+        VTY_ACL_BLOCK="! VTY-ACL not emitted — mgmt-acl list is empty.
+! Populate it on the tacquito server with
+!   tacctl config mgmt-acl add <cidr>
+! then re-run 'tacctl config cisco' to get the access-list block."
+        VTY_ACCESS_CLASS="! access-class VTY-ACL in   ! uncomment after populating mgmt-acl"
     fi
 
     echo ""
@@ -1487,8 +1495,8 @@ ip access-list standard VTY-ACL
     local template_file
     template_file=$(resolve_template "cisco")
     if [[ -n "$template_file" ]]; then
-        export SERVER_IP="$server_ip" SECRET="$secret" PRIVILEGE_COMMANDS GROUP_SUMMARY VTY_ACL_BLOCK
-        envsubst '${SERVER_IP} ${SECRET} ${PRIVILEGE_COMMANDS} ${GROUP_SUMMARY} ${VTY_ACL_BLOCK}' < "$template_file"
+        export SERVER_IP="$server_ip" SECRET="$secret" PRIVILEGE_COMMANDS GROUP_SUMMARY VTY_ACL_BLOCK VTY_ACCESS_CLASS
+        envsubst '${SERVER_IP} ${SECRET} ${PRIVILEGE_COMMANDS} ${GROUP_SUMMARY} ${VTY_ACL_BLOCK} ${VTY_ACCESS_CLASS}' < "$template_file"
     else
         cat <<EOF
 ! --- TACACS+ Server & AAA ---
@@ -1525,7 +1533,7 @@ line con 0
 line vty 0 15
   login authentication default
   transport input ssh
-  access-class VTY-ACL in
+${VTY_ACCESS_CLASS}
   exec-timeout 60 0
 EOF
     fi
@@ -1539,7 +1547,7 @@ EOF
     echo "  - The 'local' fallback ensures access if TACACS+ is unreachable"
     echo "  - Ensure a local admin account exists as a backup"
     echo "  - Replace <MGMT_IF> with your management interface (e.g. Loopback0)"
-    echo "  - Edit VTY-ACL permits to match your operator subnets"
+    echo "  - VTY-ACL permits are managed with 'tacctl config mgmt-acl add <cidr>'"
     echo "  - For Type 6 (AES) key encryption, run on the device first:"
     echo "      conf t ; key config-key password-encrypt <master-key>"
     echo "      password encryption aes"
