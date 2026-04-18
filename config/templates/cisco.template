@@ -39,10 +39,10 @@ ip access-list standard VTY-ACL
 !
 line con 0
   login authentication default
-  exec-timeout 10 0
+  exec-timeout 60 0
 !
 line vty 0 15
   login authentication default
   transport input ssh
   access-class VTY-ACL in
-  exec-timeout 10 0
+  exec-timeout 60 0
